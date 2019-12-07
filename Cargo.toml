@@ -1,0 +1,8 @@
+[package]
+name = "roommate_simulation"
+version = "0.1.0"
+authors = ["gbourdon <34389449+gbourdon@users.noreply.github.com>"]
+edition = "2018"
+
+[dependencies]
+rand = "0.7.2"
