@@ -1,5 +1,12 @@
 use rand::prelude::*;
+use rand::seq::SliceRandom;
+
+use std::collections::HashMap;
+
+use std::time::SystemTime;
 use std::thread;
+use std::sync::mpsc;
+
 
 fn shifting(switch_prob: f64) -> bool {
     let mut rng = rand::thread_rng();
@@ -22,44 +29,116 @@ fn matchmaker(sims: u64, threads: u64) -> (Vec<u64>, u64) {
     (sim_assignments, remainder)
 }
 
-fn simulation(range: std::ops::Range<u64>, students: u64, switch_prob: f64) {
+fn match_students (students: Vec<u64>) -> HashMap<usize,u64> {
+    let mut pairs = shuffle(students);
+    
+    let mut result= HashMap::new();
+    
+    let half_two = pairs.split_off(pairs.len()/2);
+
+    for p in 0..pairs.len() {
+        result.insert(pairs[p] as usize, half_two[p]);
+        result.insert(half_two[p] as usize, pairs[p]);
+    }
+
+    result
+}
+
+fn shuffle(list: Vec<u64>) -> Vec<u64> {
+    let mut pairs = list;
+    let mut rng = rand::thread_rng();
+
+    pairs.shuffle(&mut rng);
+    for n in 0..pairs.len() {
+        if pairs[n] == n as u64 {
+            pairs = shuffle(pairs);
+        }
+    }
+    pairs
+}
+
+fn to_array(hash: HashMap<usize, u64>) -> Vec<u64> {
+    let mut out: Vec<u64> = Vec::new();
+    let mut vec: Vec<usize> = Vec::new();
+    for key in hash.keys() {
+        vec.push(*key);
+    }
+    vec.sort();
+    for key in vec {
+        out.push(hash[&key]);
+    }
+    out
+}
+
+fn simulation(range: std::ops::Range<u64>, students: u64, switch_prob: f64, tx: std::sync::mpsc::Sender<u32>) {
     for sim_num in range {
-        let mut num_stay = 0; // How many students are staying with their roommate?
-        let mut num_shift = 0; // And how many are changing roomates?
-        for _ in 0..students { // Finds if a student is keeping their roomate or changeing it
-            let switching: bool = shifting(switch_prob);
-            if switching {
-                num_shift += 1;
+        let mut students_init: Vec<u64> = Vec::new();
+        for s in 0..students { // Bodge, but a nessesary one, but feel free to correct this.
+            students_init.push(s);
+        }
+
+        let roommates: HashMap<usize, u64> = match_students(students_init);
+        let mut switching: HashMap<usize, bool> = HashMap::new();
+        for (roommate, _) in roommates.clone() {
+            if shifting(switch_prob) {
+                switching.insert(roommate, true);
             } else {
-                num_stay += 1;
+                switching.insert(roommate, false);
+            }
+
+        }
+
+        // Adds one of the sim's conditions
+        switching.insert(0,true);
+        switching.insert(1,true);
+        
+        let mut new_roommates = HashMap::new();
+        for (roommate, _) in roommates.clone() {
+            if switching[&roommate] {
+                new_roommates.insert(roommate, roommates[&roommate]);
+                new_roommates.insert(roommates[&roommate] as usize, roommate as u64);
             }
         }
-        println!("SIM: {}: Staying: {}, Switching: {}", sim_num, num_stay, num_shift); // And gives the results
+
+        let new_roommate = match_students(to_array(new_roommates));
+        let mut sucessful = false;
+
+        if new_roommate[&0] == 1 {
+            sucessful = true;
+        }
+        if sucessful {
+            tx.send(1).unwrap();
+        } else {
+            tx.send(0).unwrap();
+        }
+        println!("SIM: {}: Roomates matching: {}", sim_num, sucessful);
     }
 }
 
 fn main() {
+    let now = SystemTime::now();
     const SIMS_TO_RUN: u64 = 10000; // How many simulations do you want to run?
-    const CONCURRENT_THREADS: u64 = 6; // How many do you want to run at once?
-    const NUMBER_OF_STUDENTS: u64 = 1000; // How many students (that matter) are "participating"?
+    const CONCURRENT_THREADS: u64 = 10; // How many do you want to run at once?
+    const NUMBER_OF_STUDENTS: u64 = 250; // How many students (that matter) are "participating"?
     const SWITCH_CHANCE: f64 = 0.25; // What is the chance that a student will change their roommate?
     
     let (sim_assignments, remainder) = matchmaker(SIMS_TO_RUN, CONCURRENT_THREADS);
     let mut threads = vec![];
+    let (tx, rx) = mpsc::channel();
     
     for n in 0..CONCURRENT_THREADS {
+        let tx = tx.clone();
         if n == 0 { // Deals with accesing (0-1). Is there a function of Vec that allows this to be removed (IE v.at((n-1),0))
             let t_sim_assignments = sim_assignments.clone();
     
             let thread = thread::Builder::new().name(n.to_string()).spawn(move || {
-                simulation(0..(t_sim_assignments)[n as usize], NUMBER_OF_STUDENTS, SWITCH_CHANCE);
+                simulation(0..(t_sim_assignments)[n as usize], NUMBER_OF_STUDENTS, SWITCH_CHANCE, tx);
             }).unwrap();
             threads.push(thread);
         } else { // Deals with everything else
             let t_sim_assignments = sim_assignments.clone();
-    
             let thread = thread::Builder::new().name(n.to_string()).spawn(move || {
-                simulation((n-1)..(t_sim_assignments)[n as usize], NUMBER_OF_STUDENTS, SWITCH_CHANCE);
+                simulation(t_sim_assignments[(n-1) as usize]..(t_sim_assignments)[n as usize], NUMBER_OF_STUDENTS, SWITCH_CHANCE, tx);
             }).unwrap();
             threads.push(thread);
         }
@@ -69,14 +148,31 @@ fn main() {
     if remainder !=0 {
     
         let thread = thread::Builder::new().name("Remainder".to_string()).spawn(move || {
-            simulation((SIMS_TO_RUN-remainder)..SIMS_TO_RUN, NUMBER_OF_STUDENTS, SWITCH_CHANCE);
+            simulation((SIMS_TO_RUN-remainder)..SIMS_TO_RUN, NUMBER_OF_STUDENTS, SWITCH_CHANCE, tx);
             
         }).unwrap();
         threads.push(thread);    
     }
 
     // Puts a bow on it
-    for thread in threads {
+    /*for thread in threads {
         thread.join().unwrap();
+    }*/
+    
+    let mut sims_finished = 0;
+    let mut perfect = 0;
+    for recieved in rx {
+        if recieved == 1 {
+            perfect += 1;
+        }
+        sims_finished += 1;
+        if sims_finished == (SIMS_TO_RUN) {
+            break;
+        }
     }
+
+    println!("{} simulations completed", sims_finished);
+    println!("{} combinations with Person 1 having Person 2 as a roommate.", perfect);
+
+    println!("Time taken: {} ms", now.elapsed().unwrap().as_millis());
 }
