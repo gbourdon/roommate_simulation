@@ -117,7 +117,7 @@ fn simulation(range: std::ops::Range<u64>, students: u64, switch_prob: f64, tx: 
 
 fn main() {
     let now = SystemTime::now();
-    const SIMS_TO_RUN: u64 = 10000; // How many simulations do you want to run?
+    const SIMS_TO_RUN: u64 = 100_000; // How many simulations do you want to run?
     const CONCURRENT_THREADS: u64 = 10; // How many do you want to run at once?
     const NUMBER_OF_STUDENTS: u64 = 250; // How many students (that matter) are "participating"?
     const SWITCH_CHANCE: f64 = 0.25; // What is the chance that a student will change their roommate?
